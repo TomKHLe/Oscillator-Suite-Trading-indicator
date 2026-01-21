@@ -1,0 +1,489 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © Quantum Market Dynamics Indicator
+//
+// QUANTUM MARKET MAKER DYNAMICS (QMMD)
+// =====================================
+// A sophisticated multi-dimensional indicator combining:
+// 1. Shannon Entropy & KL Divergence - Order flow information asymmetry
+// 2. Hurst Exponent - Market regime detection (trending/mean-reverting/random)
+// 3. Lévy Alpha Stability - Fat-tail jump risk detection
+// 4. Avellaneda-Stoikov MM Inventory Model - Market maker pressure estimation
+// 5. Quantum Probability Fields - Price distribution modeling
+
+//@version=5
+indicator("Quantum Market Maker Dynamics", "QMMD", overlay=false, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+group_entropy = "══════ ENTROPY & INFORMATION FLOW ══════"
+entropy_length = input.int(20, "Entropy Lookback", minval=5, maxval=100, group=group_entropy)
+kl_smooth = input.int(5, "KL Divergence Smoothing", minval=1, maxval=20, group=group_entropy)
+
+group_hurst = "══════ HURST EXPONENT (REGIME) ══════"
+hurst_length = input.int(100, "Hurst Calculation Period", minval=20, maxval=500, group=group_hurst)
+hurst_lags = input.int(20, "Hurst Lag Divisions", minval=5, maxval=50, group=group_hurst)
+
+group_levy = "══════ LÉVY STABILITY (JUMP RISK) ══════"
+levy_length = input.int(50, "Lévy Lookback Period", minval=20, maxval=200, group=group_levy)
+levy_threshold = input.float(1.7, "Lévy Jump Threshold", minval=1.0, maxval=2.0, step=0.05, group=group_levy)
+
+group_mm = "══════ MARKET MAKER MODEL ══════"
+mm_gamma = input.float(0.1, "MM Risk Aversion (γ)", minval=0.01, maxval=1.0, step=0.01, group=group_mm)
+mm_kappa = input.float(1.5, "MM Order Intensity (κ)", minval=0.1, maxval=5.0, step=0.1, group=group_mm)
+mm_sigma_mult = input.float(1.0, "Volatility Multiplier", minval=0.1, maxval=3.0, step=0.1, group=group_mm)
+
+group_quantum = "══════ QUANTUM PROBABILITY FIELD ══════"
+qpf_periods = input.int(14, "Wave Function Period", minval=5, maxval=50, group=group_quantum)
+qpf_decoherence = input.float(0.95, "Decoherence Rate", minval=0.5, maxval=0.99, step=0.01, group=group_quantum)
+
+group_visual = "══════ VISUALIZATION ══════"
+show_entropy_panel = input.bool(true, "Show Entropy Panel", group=group_visual)
+show_regime_bg = input.bool(true, "Show Regime Background", group=group_visual)
+show_mm_pressure = input.bool(true, "Show MM Pressure", group=group_visual)
+show_probability_cloud = input.bool(true, "Show Probability Cloud", group=group_visual)
+
+// ============================================================================
+// CORE MATHEMATICAL FUNCTIONS
+// ============================================================================
+
+// --- LOGARITHM HELPERS ---
+log2(x) =>
+    math.log(math.max(x, 1e-10)) / math.log(2)
+
+ln(x) =>
+    math.log(math.max(x, 1e-10))
+
+// --- RETURNS CALCULATION ---
+returns = math.log(close / close[1])
+abs_returns = math.abs(returns)
+
+// ============================================================================
+// 1. SHANNON ENTROPY & KULLBACK-LEIBLER DIVERGENCE
+// ============================================================================
+// Measures information content and asymmetry in price movements
+// High entropy = uncertainty/accumulation, Low entropy = directional conviction
+
+// Discretize returns into bins for probability estimation
+bins = 10
+returns_std = ta.stdev(returns, entropy_length)
+returns_normalized = returns / math.max(returns_std, 1e-10)
+
+// Calculate histogram-based probability distribution
+get_bin(val, num_bins) =>
+    // Clamp to [-3, 3] standard deviations, map to bins
+    clamped = math.max(-3.0, math.min(3.0, val))
+    int(math.floor((clamped + 3.0) / 6.0 * (num_bins - 1)))
+
+current_bin = get_bin(returns_normalized, bins)
+
+// Count occurrences in each bin over lookback
+bin_count_0 = ta.cum(current_bin == 0 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 0 ? 1 : 0)
+bin_count_1 = ta.cum(current_bin == 1 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 1 ? 1 : 0)
+bin_count_2 = ta.cum(current_bin == 2 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 2 ? 1 : 0)
+bin_count_3 = ta.cum(current_bin == 3 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 3 ? 1 : 0)
+bin_count_4 = ta.cum(current_bin == 4 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 4 ? 1 : 0)
+bin_count_5 = ta.cum(current_bin == 5 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 5 ? 1 : 0)
+bin_count_6 = ta.cum(current_bin == 6 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 6 ? 1 : 0)
+bin_count_7 = ta.cum(current_bin == 7 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 7 ? 1 : 0)
+bin_count_8 = ta.cum(current_bin == 8 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 8 ? 1 : 0)
+bin_count_9 = ta.cum(current_bin == 9 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 9 ? 1 : 0)
+
+total_counts = bin_count_0 + bin_count_1 + bin_count_2 + bin_count_3 + bin_count_4 +
+               bin_count_5 + bin_count_6 + bin_count_7 + bin_count_8 + bin_count_9
+
+// Probabilities
+p0 = bin_count_0 / math.max(total_counts, 1)
+p1 = bin_count_1 / math.max(total_counts, 1)
+p2 = bin_count_2 / math.max(total_counts, 1)
+p3 = bin_count_3 / math.max(total_counts, 1)
+p4 = bin_count_4 / math.max(total_counts, 1)
+p5 = bin_count_5 / math.max(total_counts, 1)
+p6 = bin_count_6 / math.max(total_counts, 1)
+p7 = bin_count_7 / math.max(total_counts, 1)
+p8 = bin_count_8 / math.max(total_counts, 1)
+p9 = bin_count_9 / math.max(total_counts, 1)
+
+// Shannon Entropy: H = -Σ p(x) * log2(p(x))
+entropy_term(p) =>
+    p > 0 ? -p * log2(p) : 0.0
+
+shannon_entropy = entropy_term(p0) + entropy_term(p1) + entropy_term(p2) + entropy_term(p3) +
+                  entropy_term(p4) + entropy_term(p5) + entropy_term(p6) + entropy_term(p7) +
+                  entropy_term(p8) + entropy_term(p9)
+
+// Normalize entropy (max entropy for 10 bins = log2(10) ≈ 3.32)
+max_entropy = log2(bins)
+normalized_entropy = shannon_entropy / max_entropy
+
+// KL Divergence: Compare current distribution to uniform (market efficiency measure)
+// D_KL(P||Q) = Σ P(x) * log(P(x)/Q(x))
+uniform_p = 1.0 / bins
+kl_term(p, q) =>
+    p > 0 ? p * ln(p / q) : 0.0
+
+kl_divergence_raw = kl_term(p0, uniform_p) + kl_term(p1, uniform_p) + kl_term(p2, uniform_p) +
+                    kl_term(p3, uniform_p) + kl_term(p4, uniform_p) + kl_term(p5, uniform_p) +
+                    kl_term(p6, uniform_p) + kl_term(p7, uniform_p) + kl_term(p8, uniform_p) +
+                    kl_term(p9, uniform_p)
+
+kl_divergence = ta.sma(kl_divergence_raw, kl_smooth)
+
+// Asymmetry: Compare bullish (bins 5-9) vs bearish (bins 0-4) probability mass
+bullish_mass = p5 + p6 + p7 + p8 + p9
+bearish_mass = p0 + p1 + p2 + p3 + p4
+information_asymmetry = (bullish_mass - bearish_mass) / math.max(bullish_mass + bearish_mass, 1e-10)
+
+// ============================================================================
+// 2. HURST EXPONENT - REGIME DETECTION
+// ============================================================================
+// H < 0.5: Mean-reverting (anti-persistent)
+// H = 0.5: Random walk (Brownian motion)
+// H > 0.5: Trending (persistent)
+// Uses R/S (Rescaled Range) analysis
+
+// R/S Analysis for Hurst Exponent
+calculate_rs(length) =>
+    // Mean of returns over period
+    mean_ret = ta.sma(returns, length)
+
+    // Cumulative deviation from mean
+    var float cum_dev = 0.0
+    var float max_cum = -1e10
+    var float min_cum = 1e10
+
+    cum_dev := 0.0
+    max_cum := -1e10
+    min_cum := 1e10
+
+    // Calculate cumulative deviations
+    for i = 0 to length - 1
+        cum_dev := cum_dev + (returns[i] - mean_ret)
+        max_cum := math.max(max_cum, cum_dev)
+        min_cum := math.min(min_cum, cum_dev)
+
+    // Range
+    R = max_cum - min_cum
+
+    // Standard deviation
+    S = ta.stdev(returns, length)
+
+    // R/S statistic
+    rs = R / math.max(S, 1e-10)
+    rs
+
+// Calculate R/S for multiple lag values and perform linear regression
+// log(R/S) = H * log(n) + c
+rs_10 = calculate_rs(10)
+rs_20 = calculate_rs(20)
+rs_40 = calculate_rs(40)
+rs_80 = calculate_rs(math.min(80, hurst_length))
+
+// Log values for regression
+log_n_10 = math.log(10)
+log_n_20 = math.log(20)
+log_n_40 = math.log(40)
+log_n_80 = math.log(math.min(80, hurst_length))
+
+log_rs_10 = math.log(math.max(rs_10, 1e-10))
+log_rs_20 = math.log(math.max(rs_20, 1e-10))
+log_rs_40 = math.log(math.max(rs_40, 1e-10))
+log_rs_80 = math.log(math.max(rs_80, 1e-10))
+
+// Simple linear regression slope estimation for Hurst
+// H = Cov(log_n, log_rs) / Var(log_n)
+mean_log_n = (log_n_10 + log_n_20 + log_n_40 + log_n_80) / 4
+mean_log_rs = (log_rs_10 + log_rs_20 + log_rs_40 + log_rs_80) / 4
+
+cov_term = (log_n_10 - mean_log_n) * (log_rs_10 - mean_log_rs) +
+           (log_n_20 - mean_log_n) * (log_rs_20 - mean_log_rs) +
+           (log_n_40 - mean_log_n) * (log_rs_40 - mean_log_rs) +
+           (log_n_80 - mean_log_n) * (log_rs_80 - mean_log_rs)
+
+var_term = math.pow(log_n_10 - mean_log_n, 2) + math.pow(log_n_20 - mean_log_n, 2) +
+           math.pow(log_n_40 - mean_log_n, 2) + math.pow(log_n_80 - mean_log_n, 2)
+
+hurst_raw = cov_term / math.max(var_term, 1e-10)
+hurst_exponent = ta.sma(math.max(0.0, math.min(1.0, hurst_raw)), 10)
+
+// Regime classification
+regime_trending = hurst_exponent > 0.55
+regime_mean_reverting = hurst_exponent < 0.45
+regime_random = not regime_trending and not regime_mean_reverting
+
+// ============================================================================
+// 3. LÉVY ALPHA STABILITY PARAMETER
+// ============================================================================
+// α = 2: Gaussian (normal distribution)
+// α < 2: Fat tails (Lévy stable)
+// α → 1: Cauchy distribution (extreme fat tails)
+// Lower α indicates higher probability of large jumps
+
+// Estimate α using the characteristic function method (McCulloch's quantile estimator)
+// Simplified approach: use kurtosis relationship
+// For stable distributions, kurtosis is undefined for α < 2
+// We use a tail index estimator based on Hill estimator
+
+// Calculate absolute returns for tail analysis
+sorted_returns = array.new_float(levy_length)
+for i = 0 to levy_length - 1
+    array.set(sorted_returns, i, math.abs(returns[i]))
+
+// Sort for order statistics (bubble sort - Pine Script limitation)
+for i = 0 to levy_length - 2
+    for j = 0 to levy_length - i - 2
+        if array.get(sorted_returns, j) < array.get(sorted_returns, j + 1)
+            temp = array.get(sorted_returns, j)
+            array.set(sorted_returns, j, array.get(sorted_returns, j + 1))
+            array.set(sorted_returns, j + 1, temp)
+
+// Hill estimator for tail index
+k = int(math.sqrt(levy_length))  // Number of order statistics to use
+hill_sum = 0.0
+x_k = math.max(array.get(sorted_returns, k), 1e-10)
+
+for i = 0 to k - 1
+    x_i = math.max(array.get(sorted_returns, i), 1e-10)
+    hill_sum := hill_sum + math.log(x_i / x_k)
+
+hill_estimator = k / math.max(hill_sum, 1e-10)
+
+// Convert Hill estimator to Lévy alpha (α ∈ (0, 2])
+// Hill estimator estimates the tail index, α = min(hill, 2)
+levy_alpha_raw = math.min(hill_estimator, 2.0)
+levy_alpha = ta.ema(levy_alpha_raw, 10)
+
+// Jump probability indicator
+// Lower alpha = higher jump probability
+jump_risk = 1.0 - (levy_alpha / 2.0)  // Normalized 0-1, higher = more risk
+jump_alert = levy_alpha < levy_threshold
+
+// ============================================================================
+// 4. AVELLANEDA-STOIKOV MARKET MAKER MODEL
+// ============================================================================
+// Models optimal bid/ask spread and inventory pressure
+// Reservation price: r = s - q*γ*σ²*(T-t)
+// Optimal spread: δ = γ*σ²*(T-t) + (2/γ)*ln(1 + γ/κ)
+
+// Volatility estimation (using Parkinson's range-based estimator for efficiency)
+high_low_range = math.log(high / low)
+parkinson_vol = math.sqrt(ta.sma(math.pow(high_low_range, 2), 20) / (4 * math.log(2))) * mm_sigma_mult
+
+// Estimate market maker inventory proxy using order flow imbalance
+// Positive = MM likely long, Negative = MM likely short
+buy_volume = volume * (close - low) / math.max(high - low, 1e-10)
+sell_volume = volume * (high - close) / math.max(high - low, 1e-10)
+order_flow_imbalance = ta.sma(buy_volume - sell_volume, 20)
+ofi_normalized = order_flow_imbalance / math.max(ta.stdev(order_flow_imbalance, 50), 1e-10)
+
+// Inventory proxy: cumulative OFI represents MM inventory accumulation
+mm_inventory_proxy = ta.sma(ofi_normalized, 10)
+
+// Time decay factor (normalized, assuming continuous trading)
+T_minus_t = 1.0  // Simplified: constant time horizon
+
+// Reservation price adjustment
+// When MM is long (positive inventory), they want to sell → lower reservation price
+// When MM is short (negative inventory), they want to buy → higher reservation price
+reservation_adjustment = -mm_inventory_proxy * mm_gamma * math.pow(parkinson_vol, 2) * T_minus_t
+
+// Optimal spread calculation
+optimal_spread = mm_gamma * math.pow(parkinson_vol, 2) * T_minus_t + (2 / mm_gamma) * math.log(1 + mm_gamma / mm_kappa)
+
+// MM Pressure: direction MM wants price to move
+// Positive = MM wants price up (they're short), Negative = MM wants price down (they're long)
+mm_pressure = -mm_inventory_proxy
+mm_pressure_normalized = mm_pressure / math.max(ta.stdev(mm_pressure, 50), 1e-10)
+
+// ============================================================================
+// 5. QUANTUM PROBABILITY FIELD
+// ============================================================================
+// Models price as a quantum wave function with probability amplitude
+// Uses superposition principle: price exists in multiple states until "measured"
+
+// Wave function parameters
+// ψ(x,t) = A * exp(-((x-μ)²)/(4σ²)) * exp(i*k*x)  [Gaussian wave packet]
+
+// Expected price (mean of wave packet)
+wave_mean = ta.ema(close, qpf_periods)
+
+// Uncertainty (standard deviation of wave packet)
+wave_sigma = ta.stdev(close, qpf_periods) * (2 - levy_alpha)  // Wider for fat tails
+
+// Probability density at current price
+prob_density_current = math.exp(-math.pow(close - wave_mean, 2) / (2 * math.pow(wave_sigma, 2)))
+
+// Momentum operator (derivative of phase)
+wave_momentum = ta.mom(close, qpf_periods) / math.max(wave_sigma, 1e-10)
+
+// Heisenberg uncertainty: Δx * Δp ≥ ℏ/2
+// Higher certainty in price → less certainty in momentum (and vice versa)
+position_uncertainty = wave_sigma / close
+momentum_uncertainty = ta.stdev(wave_momentum, qpf_periods)
+heisenberg_product = position_uncertainty * momentum_uncertainty
+
+// Quantum coherence (how "classical" vs "quantum" the price behavior is)
+// Decoherence occurs when the system interacts with environment (high volume/volatility)
+volume_normalized = volume / ta.sma(volume, 50)
+decoherence_factor = math.exp(-volume_normalized * (1 - qpf_decoherence))
+quantum_coherence = ta.ema(decoherence_factor, qpf_periods)
+
+// Probability cloud boundaries (1σ, 2σ, 3σ)
+prob_cloud_1u = wave_mean + wave_sigma
+prob_cloud_1l = wave_mean - wave_sigma
+prob_cloud_2u = wave_mean + 2 * wave_sigma
+prob_cloud_2l = wave_mean - 2 * wave_sigma
+prob_cloud_3u = wave_mean + 3 * wave_sigma
+prob_cloud_3l = wave_mean - 3 * wave_sigma
+
+// Wave function collapse indicator
+// When price moves beyond 2σ with high momentum, wave function "collapses"
+wave_collapse = math.abs(close - wave_mean) > 2 * wave_sigma and math.abs(wave_momentum) > 2
+
+// ============================================================================
+// 6. COMPOSITE SIGNALS
+// ============================================================================
+
+// Composite Market State Score (-100 to +100)
+// Combines all components into directional bias
+
+entropy_signal = information_asymmetry * 25  // -25 to +25
+hurst_signal = (hurst_exponent - 0.5) * 50   // -25 to +25 (centered at random walk)
+mm_signal = mm_pressure_normalized * 25       // -25 to +25
+quantum_signal = wave_momentum * 5            // Momentum contribution
+
+composite_score = entropy_signal + hurst_signal + mm_signal + quantum_signal
+composite_score_clamped = math.max(-100, math.min(100, composite_score))
+
+// Risk-adjusted signal (scale by inverse of jump risk)
+risk_adjusted_signal = composite_score_clamped * (1 - jump_risk * 0.5)
+
+// Signal quality (higher when regime is clear and entropy is informative)
+signal_quality = (1 - normalized_entropy) * math.abs(hurst_exponent - 0.5) * 4 * quantum_coherence
+signal_quality_pct = math.min(signal_quality * 100, 100)
+
+// ============================================================================
+// 7. VISUALIZATION
+// ============================================================================
+
+// Color definitions
+color_bullish = color.new(#00E676, 0)
+color_bearish = color.new(#FF5252, 0)
+color_neutral = color.new(#FFC107, 0)
+color_regime_trend = color.new(#2196F3, 85)
+color_regime_revert = color.new(#9C27B0, 85)
+color_regime_random = color.new(#607D8B, 90)
+
+// Dynamic colors based on signals
+signal_color = composite_score_clamped > 20 ? color_bullish :
+               composite_score_clamped < -20 ? color_bearish : color_neutral
+
+// Main plot: Composite Signal
+plot(composite_score_clamped, "Composite Signal", signal_color, 2)
+hline(0, "Zero Line", color.gray, hline.style_dashed)
+hline(50, "Strong Bullish", color.new(color_bullish, 70), hline.style_dotted)
+hline(-50, "Strong Bearish", color.new(color_bearish, 70), hline.style_dotted)
+
+// Entropy bar (shows information content)
+entropy_color = normalized_entropy > 0.8 ? color.new(#FFC107, 30) :
+                normalized_entropy > 0.6 ? color.new(#FF9800, 30) :
+                color.new(#4CAF50, 30)
+plot(show_entropy_panel ? normalized_entropy * 30 - 80 : na, "Entropy Level", entropy_color, 4, plot.style_histogram)
+
+// KL Divergence spike detector
+kl_spike = kl_divergence > ta.sma(kl_divergence, 20) * 2
+plotshape(kl_spike ? -90 : na, "KL Spike", shape.diamond, location.absolute, color.new(#E91E63, 0), size=size.tiny)
+
+// Hurst regime background
+regime_color = regime_trending ? color_regime_trend :
+               regime_mean_reverting ? color_regime_revert : color_regime_random
+bgcolor(show_regime_bg ? regime_color : na, title="Regime Background")
+
+// Jump risk warning
+jump_color = color.new(#FF1744, 100 - int(jump_risk * 80))
+plot(jump_risk * 40 - 70, "Jump Risk", jump_color, 2, plot.style_area)
+
+// MM Pressure arrows
+mm_strong_buy = mm_pressure_normalized > 1.5 and hurst_exponent > 0.5
+mm_strong_sell = mm_pressure_normalized < -1.5 and hurst_exponent > 0.5
+plotshape(mm_strong_buy, "MM Buy Pressure", shape.triangleup, location.bottom, color_bullish, size=size.small)
+plotshape(mm_strong_sell, "MM Sell Pressure", shape.triangledown, location.top, color_bearish, size=size.small)
+
+// Wave collapse events
+plotshape(wave_collapse and close > wave_mean, "Bullish Collapse", shape.circle, location.top, color.new(#00E5FF, 0), size=size.tiny)
+plotshape(wave_collapse and close < wave_mean, "Bearish Collapse", shape.circle, location.bottom, color.new(#FF4081, 0), size=size.tiny)
+
+// ============================================================================
+// 8. INFORMATION TABLE
+// ============================================================================
+
+var table info_table = table.new(position.top_right, 2, 10, bgcolor=color.new(#1E1E1E, 10), border_width=1)
+
+if barstate.islast
+    // Regime text
+    regime_text = regime_trending ? "TRENDING" : regime_mean_reverting ? "MEAN REVERT" : "RANDOM WALK"
+    regime_text_color = regime_trending ? color_bullish : regime_mean_reverting ? color.new(#9C27B0, 0) : color.gray
+
+    // MM stance
+    mm_text = mm_pressure_normalized > 1 ? "ACCUMULATING" : mm_pressure_normalized < -1 ? "DISTRIBUTING" : "NEUTRAL"
+    mm_text_color = mm_pressure_normalized > 1 ? color_bullish : mm_pressure_normalized < -1 ? color_bearish : color.gray
+
+    // Signal strength
+    signal_text = math.abs(composite_score_clamped) > 70 ? "STRONG" :
+                  math.abs(composite_score_clamped) > 40 ? "MODERATE" : "WEAK"
+
+    table.cell(info_table, 0, 0, "QMMD DASHBOARD", text_color=color.white, text_size=size.small)
+    table.cell(info_table, 1, 0, "", text_color=color.white)
+
+    table.cell(info_table, 0, 1, "Regime:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 1, regime_text, text_color=regime_text_color, text_size=size.tiny)
+
+    table.cell(info_table, 0, 2, "Hurst:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 2, str.tostring(hurst_exponent, "#.###"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(info_table, 0, 3, "Entropy:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 3, str.tostring(normalized_entropy, "#.##"), text_color=entropy_color, text_size=size.tiny)
+
+    table.cell(info_table, 0, 4, "Lévy α:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 4, str.tostring(levy_alpha, "#.##"), text_color=jump_alert ? color_bearish : color.white, text_size=size.tiny)
+
+    table.cell(info_table, 0, 5, "Jump Risk:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 5, str.tostring(jump_risk * 100, "#.#") + "%", text_color=jump_color, text_size=size.tiny)
+
+    table.cell(info_table, 0, 6, "MM Stance:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 6, mm_text, text_color=mm_text_color, text_size=size.tiny)
+
+    table.cell(info_table, 0, 7, "Signal:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 7, str.tostring(composite_score_clamped, "#.#"), text_color=signal_color, text_size=size.tiny)
+
+    table.cell(info_table, 0, 8, "Quality:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 8, str.tostring(signal_quality_pct, "#.#") + "%", text_color=color.white, text_size=size.tiny)
+
+    table.cell(info_table, 0, 9, "Coherence:", text_color=color.gray, text_size=size.tiny)
+    table.cell(info_table, 1, 9, str.tostring(quantum_coherence, "#.###"), text_color=color.new(#00E5FF, 0), text_size=size.tiny)
+
+// ============================================================================
+// 9. ALERTS
+// ============================================================================
+
+// Strong signal alerts
+alertcondition(composite_score_clamped > 70, "Strong Bullish Signal", "QMMD: Strong bullish signal detected")
+alertcondition(composite_score_clamped < -70, "Strong Bearish Signal", "QMMD: Strong bearish signal detected")
+
+// Regime change alerts
+alertcondition(ta.cross(hurst_exponent, 0.55), "Trending Regime", "QMMD: Market entering trending regime")
+alertcondition(ta.cross(0.45, hurst_exponent), "Mean Reverting Regime", "QMMD: Market entering mean-reverting regime")
+
+// Jump risk alert
+alertcondition(jump_alert and not jump_alert[1], "High Jump Risk", "QMMD: Elevated jump/tail risk detected")
+
+// Wave collapse alert
+alertcondition(wave_collapse, "Wave Function Collapse", "QMMD: Price probability wave collapsed - potential breakout")
+
+// MM pressure extremes
+alertcondition(mm_strong_buy, "MM Accumulation", "QMMD: Market maker accumulation pressure detected")
+alertcondition(mm_strong_sell, "MM Distribution", "QMMD: Market maker distribution pressure detected")
+
+// Entropy spike (uncertainty surge)
+alertcondition(normalized_entropy > 0.9 and normalized_entropy[1] <= 0.9, "Entropy Spike", "QMMD: Market uncertainty spike - potential accumulation/distribution phase")
