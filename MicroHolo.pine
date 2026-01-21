@@ -61,9 +61,9 @@ sell_volume = bar_range > 0 ? volume * (high - close) / bar_range : volume * 0.5
 delta = buy_volume - sell_volume
 cum_delta = ta.cum(delta)
 
-// Delta over lookback period
-delta_sum_buy = ta.sum(buy_volume, delta_length)
-delta_sum_sell = ta.sum(sell_volume, delta_length)
+// Delta over lookback period (using SMA * length as sum approximation)
+delta_sum_buy = ta.sma(buy_volume, delta_length) * delta_length
+delta_sum_sell = ta.sma(sell_volume, delta_length) * delta_length
 delta_total = delta_sum_buy + delta_sum_sell
 
 // Delta ratio (0-1, 0.5 = balanced)
