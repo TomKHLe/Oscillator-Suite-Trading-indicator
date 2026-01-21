@@ -46,6 +46,26 @@ show_labels = input.bool(true, "Show Entry Labels", group=group_display)
 show_dashboard = input.bool(true, "Show Dashboard", group=group_display)
 
 // ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+// Custom atan2 implementation (Pine Script doesn't have math.atan2)
+atan2(y, x) =>
+    float result = 0.0
+    if x > 0
+        result := math.atan(y / x)
+    else if x < 0 and y >= 0
+        result := math.atan(y / x) + math.pi
+    else if x < 0 and y < 0
+        result := math.atan(y / x) - math.pi
+    else if x == 0 and y > 0
+        result := math.pi / 2
+    else if x == 0 and y < 0
+        result := -math.pi / 2
+    else
+        result := 0.0
+    result
+
+// ============================================================================
 // SPECTRAL ANALYSIS - DISCRETE FOURIER TRANSFORM
 // ============================================================================
 // Extract dominant cycles using DFT components
@@ -62,7 +82,7 @@ cos_1 = math.cos(2 * math.pi * bar_index / cycle_1)
 amp_sin_1 = ta.correlation(price_detrended, sin_1, cycle_1 * 2)
 amp_cos_1 = ta.correlation(price_detrended, cos_1, cycle_1 * 2)
 cycle_1_wave = amp_sin_1 * sin_1 + amp_cos_1 * cos_1
-cycle_1_phase = math.atan2(amp_sin_1, amp_cos_1) / math.pi  // Normalized to [-1, 1]
+cycle_1_phase = atan2(amp_sin_1, amp_cos_1) / math.pi  // Normalized to [-1, 1]
 
 // Cycle 2: Medium-term cycle
 sin_2 = math.sin(2 * math.pi * bar_index / cycle_2)
@@ -70,7 +90,7 @@ cos_2 = math.cos(2 * math.pi * bar_index / cycle_2)
 amp_sin_2 = ta.correlation(price_detrended, sin_2, cycle_2 * 2)
 amp_cos_2 = ta.correlation(price_detrended, cos_2, cycle_2 * 2)
 cycle_2_wave = amp_sin_2 * sin_2 + amp_cos_2 * cos_2
-cycle_2_phase = math.atan2(amp_sin_2, amp_cos_2) / math.pi
+cycle_2_phase = atan2(amp_sin_2, amp_cos_2) / math.pi
 
 // Cycle 3: Long-term cycle
 sin_3 = math.sin(2 * math.pi * bar_index / cycle_3)
@@ -78,7 +98,7 @@ cos_3 = math.cos(2 * math.pi * bar_index / cycle_3)
 amp_sin_3 = ta.correlation(price_detrended, sin_3, cycle_3 * 2)
 amp_cos_3 = ta.correlation(price_detrended, cos_3, cycle_3 * 2)
 cycle_3_wave = amp_sin_3 * sin_3 + amp_cos_3 * cos_3
-cycle_3_phase = math.atan2(amp_sin_3, amp_cos_3) / math.pi
+cycle_3_phase = atan2(amp_sin_3, amp_cos_3) / math.pi
 
 // Composite cycle (weighted sum)
 composite_cycle = (cycle_1_wave * 0.5 + cycle_2_wave * 0.3 + cycle_3_wave * 0.2)
