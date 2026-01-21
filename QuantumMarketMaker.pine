@@ -11,7 +11,7 @@
 // 4. Avellaneda-Stoikov MM Inventory Model - Market maker pressure estimation
 // 5. Quantum Probability Fields - Price distribution modeling
 
-//@version=5
+//@version=6
 indicator("Quantum Market Maker Dynamics", "QMMD", overlay=false, max_lines_count=500, max_labels_count=500)
 
 // ============================================================================
@@ -90,8 +90,7 @@ bin_count_7 = ta.cum(current_bin == 7 ? 1 : 0) - ta.cum(current_bin[entropy_leng
 bin_count_8 = ta.cum(current_bin == 8 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 8 ? 1 : 0)
 bin_count_9 = ta.cum(current_bin == 9 ? 1 : 0) - ta.cum(current_bin[entropy_length] == 9 ? 1 : 0)
 
-total_counts = bin_count_0 + bin_count_1 + bin_count_2 + bin_count_3 + bin_count_4 +
-               bin_count_5 + bin_count_6 + bin_count_7 + bin_count_8 + bin_count_9
+total_counts = bin_count_0 + bin_count_1 + bin_count_2 + bin_count_3 + bin_count_4 + bin_count_5 + bin_count_6 + bin_count_7 + bin_count_8 + bin_count_9
 
 // Probabilities
 p0 = bin_count_0 / math.max(total_counts, 1)
@@ -109,9 +108,7 @@ p9 = bin_count_9 / math.max(total_counts, 1)
 entropy_term(p) =>
     p > 0 ? -p * log2(p) : 0.0
 
-shannon_entropy = entropy_term(p0) + entropy_term(p1) + entropy_term(p2) + entropy_term(p3) +
-                  entropy_term(p4) + entropy_term(p5) + entropy_term(p6) + entropy_term(p7) +
-                  entropy_term(p8) + entropy_term(p9)
+shannon_entropy = entropy_term(p0) + entropy_term(p1) + entropy_term(p2) + entropy_term(p3) + entropy_term(p4) + entropy_term(p5) + entropy_term(p6) + entropy_term(p7) + entropy_term(p8) + entropy_term(p9)
 
 // Normalize entropy (max entropy for 10 bins = log2(10) ≈ 3.32)
 max_entropy = log2(bins)
@@ -123,10 +120,7 @@ uniform_p = 1.0 / bins
 kl_term(p, q) =>
     p > 0 ? p * ln(p / q) : 0.0
 
-kl_divergence_raw = kl_term(p0, uniform_p) + kl_term(p1, uniform_p) + kl_term(p2, uniform_p) +
-                    kl_term(p3, uniform_p) + kl_term(p4, uniform_p) + kl_term(p5, uniform_p) +
-                    kl_term(p6, uniform_p) + kl_term(p7, uniform_p) + kl_term(p8, uniform_p) +
-                    kl_term(p9, uniform_p)
+kl_divergence_raw = kl_term(p0, uniform_p) + kl_term(p1, uniform_p) + kl_term(p2, uniform_p) + kl_term(p3, uniform_p) + kl_term(p4, uniform_p) + kl_term(p5, uniform_p) + kl_term(p6, uniform_p) + kl_term(p7, uniform_p) + kl_term(p8, uniform_p) + kl_term(p9, uniform_p)
 
 kl_divergence = ta.sma(kl_divergence_raw, kl_smooth)
 
@@ -196,13 +190,9 @@ log_rs_80 = math.log(math.max(rs_80, 1e-10))
 mean_log_n = (log_n_10 + log_n_20 + log_n_40 + log_n_80) / 4
 mean_log_rs = (log_rs_10 + log_rs_20 + log_rs_40 + log_rs_80) / 4
 
-cov_term = (log_n_10 - mean_log_n) * (log_rs_10 - mean_log_rs) +
-           (log_n_20 - mean_log_n) * (log_rs_20 - mean_log_rs) +
-           (log_n_40 - mean_log_n) * (log_rs_40 - mean_log_rs) +
-           (log_n_80 - mean_log_n) * (log_rs_80 - mean_log_rs)
+cov_term = (log_n_10 - mean_log_n) * (log_rs_10 - mean_log_rs) + (log_n_20 - mean_log_n) * (log_rs_20 - mean_log_rs) + (log_n_40 - mean_log_n) * (log_rs_40 - mean_log_rs) + (log_n_80 - mean_log_n) * (log_rs_80 - mean_log_rs)
 
-var_term = math.pow(log_n_10 - mean_log_n, 2) + math.pow(log_n_20 - mean_log_n, 2) +
-           math.pow(log_n_40 - mean_log_n, 2) + math.pow(log_n_80 - mean_log_n, 2)
+var_term = math.pow(log_n_10 - mean_log_n, 2) + math.pow(log_n_20 - mean_log_n, 2) + math.pow(log_n_40 - mean_log_n, 2) + math.pow(log_n_80 - mean_log_n, 2)
 
 hurst_raw = cov_term / math.max(var_term, 1e-10)
 hurst_exponent = ta.sma(math.max(0.0, math.min(1.0, hurst_raw)), 10)
@@ -376,8 +366,7 @@ color_regime_revert = color.new(#9C27B0, 85)
 color_regime_random = color.new(#607D8B, 90)
 
 // Dynamic colors based on signals
-signal_color = composite_score_clamped > 20 ? color_bullish :
-               composite_score_clamped < -20 ? color_bearish : color_neutral
+signal_color = composite_score_clamped > 20 ? color_bullish : composite_score_clamped < -20 ? color_bearish : color_neutral
 
 // Main plot: Composite Signal
 plot(composite_score_clamped, "Composite Signal", signal_color, 2)
@@ -386,9 +375,7 @@ hline(50, "Strong Bullish", color.new(color_bullish, 70), hline.style_dotted)
 hline(-50, "Strong Bearish", color.new(color_bearish, 70), hline.style_dotted)
 
 // Entropy bar (shows information content)
-entropy_color = normalized_entropy > 0.8 ? color.new(#FFC107, 30) :
-                normalized_entropy > 0.6 ? color.new(#FF9800, 30) :
-                color.new(#4CAF50, 30)
+entropy_color = normalized_entropy > 0.8 ? color.new(#FFC107, 30) : normalized_entropy > 0.6 ? color.new(#FF9800, 30) : color.new(#4CAF50, 30)
 plot(show_entropy_panel ? normalized_entropy * 30 - 80 : na, "Entropy Level", entropy_color, 4, plot.style_histogram)
 
 // KL Divergence spike detector
@@ -396,8 +383,7 @@ kl_spike = kl_divergence > ta.sma(kl_divergence, 20) * 2
 plotshape(kl_spike ? -90 : na, "KL Spike", shape.diamond, location.absolute, color.new(#E91E63, 0), size=size.tiny)
 
 // Hurst regime background
-regime_color = regime_trending ? color_regime_trend :
-               regime_mean_reverting ? color_regime_revert : color_regime_random
+regime_color = regime_trending ? color_regime_trend : regime_mean_reverting ? color_regime_revert : color_regime_random
 bgcolor(show_regime_bg ? regime_color : na, title="Regime Background")
 
 // Jump risk warning
@@ -430,8 +416,7 @@ if barstate.islast
     mm_text_color = mm_pressure_normalized > 1 ? color_bullish : mm_pressure_normalized < -1 ? color_bearish : color.gray
 
     // Signal strength
-    signal_text = math.abs(composite_score_clamped) > 70 ? "STRONG" :
-                  math.abs(composite_score_clamped) > 40 ? "MODERATE" : "WEAK"
+    signal_text = math.abs(composite_score_clamped) > 70 ? "STRONG" : math.abs(composite_score_clamped) > 40 ? "MODERATE" : "WEAK"
 
     table.cell(info_table, 0, 0, "QMMD DASHBOARD", text_color=color.white, text_size=size.small)
     table.cell(info_table, 1, 0, "", text_color=color.white)
