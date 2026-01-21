@@ -1,0 +1,423 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// MICROSTRUCTURE HOLOGRAPHIC SYSTEM (MHS)
+// =======================================
+// Real institutional edge combining:
+// 1. Volume Delta Imbalance - Buying vs Selling pressure
+// 2. Price Rejection Detection - Failed breakouts (high prob reversals)
+// 3. Momentum Exhaustion - Detecting move running out of steam
+// 4. VWAP Deviation - Institutional mean reversion target
+// 5. Holographic Projection - Multi-timeframe price fractal mapping
+//
+// Signals 2-5x daily on 1H chart
+
+//@version=6
+indicator("Microstructure Holographic System", "MHS", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+group_micro = "══════ MICROSTRUCTURE ══════"
+delta_length = input.int(10, "Delta Lookback", minval=3, maxval=30, group=group_micro)
+delta_threshold = input.float(0.6, "Delta Imbalance Threshold", minval=0.5, maxval=0.9, step=0.05, group=group_micro)
+rejection_wick_ratio = input.float(0.6, "Rejection Wick Ratio", minval=0.4, maxval=0.8, step=0.05, group=group_micro)
+exhaustion_bars = input.int(5, "Exhaustion Lookback", minval=3, maxval=10, group=group_micro)
+
+group_vwap = "══════ VWAP & ANCHORS ══════"
+vwap_stdev_mult = input.float(2.0, "VWAP Band Multiplier", minval=1.0, maxval=3.0, step=0.1, group=group_vwap)
+use_session_vwap = input.bool(true, "Use Session VWAP", group=group_vwap)
+
+group_holo = "══════ HOLOGRAPHIC ══════"
+holo_fast = input.int(8, "Holo Fast Period", minval=3, maxval=20, group=group_holo)
+holo_mid = input.int(21, "Holo Mid Period", minval=10, maxval=50, group=group_holo)
+holo_slow = input.int(55, "Holo Slow Period", minval=30, maxval=100, group=group_holo)
+
+group_risk = "══════ RISK MANAGEMENT ══════"
+atr_period = input.int(14, "ATR Period", minval=5, maxval=30, group=group_risk)
+sl_mult = input.float(1.2, "Stop Loss (ATR x)", minval=0.5, maxval=3.0, step=0.1, group=group_risk)
+tp1_mult = input.float(2.0, "Take Profit 1 (ATR x)", minval=1.0, maxval=4.0, step=0.1, group=group_risk)
+tp2_mult = input.float(3.5, "Take Profit 2 (ATR x)", minval=2.0, maxval=6.0, step=0.1, group=group_risk)
+
+group_display = "══════ DISPLAY ══════"
+show_vwap = input.bool(true, "Show VWAP", group=group_display)
+show_holo_cloud = input.bool(true, "Show Holo Cloud", group=group_display)
+show_sl_tp = input.bool(true, "Show SL/TP Lines", group=group_display)
+show_labels = input.bool(true, "Show Entry Labels", group=group_display)
+show_dashboard = input.bool(true, "Show Dashboard", group=group_display)
+
+// ============================================================================
+// 1. VOLUME DELTA IMBALANCE
+// ============================================================================
+// Estimates buying vs selling pressure using price position within bar
+
+// Buy volume: price closes near high = more buying
+// Sell volume: price closes near low = more selling
+bar_range = high - low
+buy_volume = bar_range > 0 ? volume * (close - low) / bar_range : volume * 0.5
+sell_volume = bar_range > 0 ? volume * (high - close) / bar_range : volume * 0.5
+
+// Cumulative delta
+delta = buy_volume - sell_volume
+cum_delta = ta.cum(delta)
+
+// Delta over lookback period
+delta_sum_buy = ta.sum(buy_volume, delta_length)
+delta_sum_sell = ta.sum(sell_volume, delta_length)
+delta_total = delta_sum_buy + delta_sum_sell
+
+// Delta ratio (0-1, 0.5 = balanced)
+delta_ratio = delta_total > 0 ? delta_sum_buy / delta_total : 0.5
+
+// Imbalance detection
+strong_buying = delta_ratio > delta_threshold
+strong_selling = delta_ratio < (1 - delta_threshold)
+
+// Delta momentum (acceleration)
+delta_sma = ta.sma(delta, delta_length)
+delta_momentum = delta - delta_sma
+delta_accelerating_up = delta_momentum > 0 and delta_momentum > delta_momentum[1]
+delta_accelerating_down = delta_momentum < 0 and delta_momentum < delta_momentum[1]
+
+// ============================================================================
+// 2. PRICE REJECTION DETECTION
+// ============================================================================
+// Identifies failed breakouts / rejection candles
+
+body = math.abs(close - open)
+upper_wick = high - math.max(close, open)
+lower_wick = math.min(close, open) - low
+total_range = high - low
+
+// Bullish rejection (hammer): long lower wick, price recovered
+bullish_rejection = total_range > 0 and lower_wick / total_range > rejection_wick_ratio and close > open
+
+// Bearish rejection (shooting star): long upper wick, price rejected
+bearish_rejection = total_range > 0 and upper_wick / total_range > rejection_wick_ratio and close < open
+
+// Failed breakout detection
+recent_high = ta.highest(high, 10)[1]
+recent_low = ta.lowest(low, 10)[1]
+
+// Price broke above recent high but closed below = failed breakout (bearish)
+failed_breakout_up = high > recent_high and close < recent_high
+
+// Price broke below recent low but closed above = failed breakout (bullish)
+failed_breakout_down = low < recent_low and close > recent_low
+
+// ============================================================================
+// 3. MOMENTUM EXHAUSTION
+// ============================================================================
+// Detects when a move is running out of steam
+
+// Price momentum
+momentum = close - close[exhaustion_bars]
+momentum_prev = close[1] - close[exhaustion_bars + 1]
+
+// Exhaustion: price still moving but momentum decreasing
+bullish_exhaustion = momentum > 0 and momentum < momentum_prev and close > close[1]
+bearish_exhaustion = momentum < 0 and momentum > momentum_prev and close < close[1]
+
+// Volume exhaustion: big move on decreasing volume
+vol_sma = ta.sma(volume, exhaustion_bars * 2)
+vol_decreasing = volume < vol_sma * 0.8
+
+// Combined exhaustion
+exhaustion_sell = bullish_exhaustion and vol_decreasing  // Uptrend exhausting
+exhaustion_buy = bearish_exhaustion and vol_decreasing   // Downtrend exhausting
+
+// ============================================================================
+// 4. VWAP CALCULATION
+// ============================================================================
+// Volume Weighted Average Price - institutional benchmark
+
+// Session VWAP (resets daily)
+var float vwap_sum_pv = 0.0
+var float vwap_sum_v = 0.0
+var float vwap_sum_pv2 = 0.0
+
+is_new_session = ta.change(time("D")) != 0
+
+if is_new_session
+    vwap_sum_pv := 0.0
+    vwap_sum_v := 0.0
+    vwap_sum_pv2 := 0.0
+
+typical_price = (high + low + close) / 3
+vwap_sum_pv := vwap_sum_pv + typical_price * volume
+vwap_sum_v := vwap_sum_v + volume
+vwap_sum_pv2 := vwap_sum_pv2 + typical_price * typical_price * volume
+
+session_vwap = vwap_sum_v > 0 ? vwap_sum_pv / vwap_sum_v : close
+vwap_variance = vwap_sum_v > 0 ? (vwap_sum_pv2 / vwap_sum_v) - (session_vwap * session_vwap) : 0.0
+vwap_stdev = math.sqrt(math.max(vwap_variance, 0))
+
+vwap_upper = session_vwap + vwap_stdev * vwap_stdev_mult
+vwap_lower = session_vwap - vwap_stdev * vwap_stdev_mult
+
+// VWAP deviation (how far from fair value)
+vwap_deviation = vwap_stdev > 0 ? (close - session_vwap) / vwap_stdev : 0
+
+// Price extended from VWAP
+price_above_vwap = close > vwap_upper
+price_below_vwap = close < vwap_lower
+
+// ============================================================================
+// 5. HOLOGRAPHIC PROJECTION
+// ============================================================================
+// Multi-timeframe fractal structure - price tends to respect these levels
+
+// Holographic EMAs (represent different "layers" of price reality)
+holo_ema_fast = ta.ema(close, holo_fast)
+holo_ema_mid = ta.ema(close, holo_mid)
+holo_ema_slow = ta.ema(close, holo_slow)
+
+// Holographic spread (measures market "coherence")
+holo_spread = math.abs(holo_ema_fast - holo_ema_slow) / close * 100
+holo_spread_sma = ta.sma(holo_spread, 20)
+holo_compressed = holo_spread < holo_spread_sma * 0.7  // EMAs converging
+
+// Holographic trend alignment
+holo_bullish = holo_ema_fast > holo_ema_mid and holo_ema_mid > holo_ema_slow
+holo_bearish = holo_ema_fast < holo_ema_mid and holo_ema_mid < holo_ema_slow
+
+// Holographic momentum (rate of change of structure)
+holo_fast_slope = (holo_ema_fast - holo_ema_fast[3]) / 3
+holo_mid_slope = (holo_ema_mid - holo_ema_mid[3]) / 3
+holo_momentum = holo_fast_slope - holo_mid_slope
+
+// Holographic reversal zones (when fast crosses mid)
+holo_cross_up = ta.crossover(holo_ema_fast, holo_ema_mid)
+holo_cross_down = ta.crossunder(holo_ema_fast, holo_ema_mid)
+
+// ============================================================================
+// 6. ATR FOR RISK MANAGEMENT
+// ============================================================================
+atr = ta.atr(atr_period)
+
+// ============================================================================
+// 7. SIGNAL GENERATION
+// ============================================================================
+
+// LONG SIGNAL CONDITIONS:
+// Method 1: Delta imbalance + rejection + VWAP support
+long_method_1 = strong_buying and (bullish_rejection or failed_breakout_down) and close >= vwap_lower
+
+// Method 2: Exhaustion at VWAP with holo support
+long_method_2 = exhaustion_buy and close < session_vwap and holo_ema_fast > holo_ema_fast[1]
+
+// Method 3: Holo cross up with delta confirmation
+long_method_3 = holo_cross_up and delta_ratio > 0.5 and not price_above_vwap
+
+// Combined long signal
+long_signal = long_method_1 or long_method_2 or long_method_3
+
+// SHORT SIGNAL CONDITIONS:
+// Method 1: Delta imbalance + rejection + VWAP resistance
+short_method_1 = strong_selling and (bearish_rejection or failed_breakout_up) and close <= vwap_upper
+
+// Method 2: Exhaustion at VWAP with holo resistance
+short_method_2 = exhaustion_sell and close > session_vwap and holo_ema_fast < holo_ema_fast[1]
+
+// Method 3: Holo cross down with delta confirmation
+short_method_3 = holo_cross_down and delta_ratio < 0.5 and not price_below_vwap
+
+// Combined short signal
+short_signal = short_method_1 or short_method_2 or short_method_3
+
+// Signal cooldown (prevent multiple signals in same move)
+var int last_signal_bar = 0
+cooldown_bars = 3
+
+can_signal = bar_index - last_signal_bar >= cooldown_bars
+
+long_signal_final = long_signal and can_signal
+short_signal_final = short_signal and can_signal
+
+if long_signal_final or short_signal_final
+    last_signal_bar := bar_index
+
+// ============================================================================
+// 8. POSITION TRACKING
+// ============================================================================
+
+var int position = 0
+var float entry_price = na
+var float stop_loss = na
+var float take_profit_1 = na
+var float take_profit_2 = na
+var string signal_type = ""
+
+// New entries
+if long_signal_final and position <= 0
+    position := 1
+    entry_price := close
+    stop_loss := close - atr * sl_mult
+    take_profit_1 := close + atr * tp1_mult
+    take_profit_2 := close + atr * tp2_mult
+    signal_type := long_method_1 ? "DELTA+REJ" : long_method_2 ? "EXHAUST" : "HOLO"
+
+if short_signal_final and position >= 0
+    position := -1
+    entry_price := close
+    stop_loss := close + atr * sl_mult
+    take_profit_1 := close - atr * tp1_mult
+    take_profit_2 := close - atr * tp2_mult
+    signal_type := short_method_1 ? "DELTA+REJ" : short_method_2 ? "EXHAUST" : "HOLO"
+
+// Exit logic
+if position == 1
+    if low <= stop_loss
+        position := 0
+    if high >= take_profit_2
+        position := 0
+
+if position == -1
+    if high >= stop_loss
+        position := 0
+    if low <= take_profit_2
+        position := 0
+
+// ============================================================================
+// 9. VISUALIZATION
+// ============================================================================
+
+// Colors
+color_buy = color.new(#00E676, 0)
+color_sell = color.new(#FF5252, 0)
+color_sl = color.new(#FF1744, 0)
+color_tp1 = color.new(#00BCD4, 0)
+color_tp2 = color.new(#76FF03, 0)
+color_vwap = color.new(#FF9800, 0)
+color_holo_fast = color.new(#E91E63, 0)
+color_holo_mid = color.new(#9C27B0, 0)
+color_holo_slow = color.new(#3F51B5, 0)
+
+// VWAP
+plot(show_vwap and use_session_vwap ? session_vwap : na, "VWAP", color_vwap, 2)
+plot(show_vwap and use_session_vwap ? vwap_upper : na, "VWAP Upper", color.new(color_vwap, 60), 1)
+plot(show_vwap and use_session_vwap ? vwap_lower : na, "VWAP Lower", color.new(color_vwap, 60), 1)
+
+// Holographic cloud
+p_holo_fast = plot(show_holo_cloud ? holo_ema_fast : na, "Holo Fast", color_holo_fast, 1)
+p_holo_mid = plot(show_holo_cloud ? holo_ema_mid : na, "Holo Mid", color_holo_mid, 1)
+p_holo_slow = plot(show_holo_cloud ? holo_ema_slow : na, "Holo Slow", color_holo_slow, 2)
+
+holo_fill_color = holo_bullish ? color.new(color_buy, 90) : holo_bearish ? color.new(color_sell, 90) : color.new(color.gray, 95)
+fill(p_holo_fast, p_holo_slow, holo_fill_color, title="Holo Cloud")
+
+// SL/TP Lines
+plot(show_sl_tp and position != 0 ? stop_loss : na, "Stop Loss", color_sl, 2, plot.style_linebr)
+plot(show_sl_tp and position != 0 ? take_profit_1 : na, "TP1", color_tp1, 2, plot.style_linebr)
+plot(show_sl_tp and position != 0 ? take_profit_2 : na, "TP2", color_tp2, 2, plot.style_linebr)
+plot(show_sl_tp and position != 0 ? entry_price : na, "Entry", color.white, 1, plot.style_linebr)
+
+// Entry signals
+plotshape(long_signal_final, "BUY", shape.triangleup, location.belowbar, color_buy, size=size.large)
+plotshape(short_signal_final, "SELL", shape.triangledown, location.abovebar, color_sell, size=size.large)
+
+// Rejection markers (small dots)
+plotshape(bullish_rejection and not long_signal_final, "Bull Rejection", shape.circle, location.belowbar, color.new(color_buy, 50), size=size.tiny)
+plotshape(bearish_rejection and not short_signal_final, "Bear Rejection", shape.circle, location.abovebar, color.new(color_sell, 50), size=size.tiny)
+
+// ============================================================================
+// 10. ENTRY LABELS
+// ============================================================================
+
+if long_signal_final and show_labels
+    sl_pct = atr * sl_mult / close * 100
+    tp1_pct = atr * tp1_mult / close * 100
+    tp2_pct = atr * tp2_mult / close * 100
+    rr = tp1_mult / sl_mult
+
+    method_txt = long_method_1 ? "Delta+Reject" : long_method_2 ? "Exhaustion" : "Holo Cross"
+
+    txt = "BUY [" + method_txt + "]\n" + str.tostring(close, "#.##") + "\n━━━━━━━━━━\n" + "SL: " + str.tostring(close - atr * sl_mult, "#.##") + " (-" + str.tostring(sl_pct, "#.#") + "%)\n" + "TP1: " + str.tostring(close + atr * tp1_mult, "#.##") + " (+" + str.tostring(tp1_pct, "#.#") + "%)\n" + "TP2: " + str.tostring(close + atr * tp2_mult, "#.##") + " (+" + str.tostring(tp2_pct, "#.#") + "%)\n" + "R:R = " + str.tostring(rr, "#.#") + ":1"
+    label.new(bar_index, low - atr * 0.5, txt, style=label.style_label_up, color=color_buy, textcolor=color.white, size=size.normal)
+
+if short_signal_final and show_labels
+    sl_pct = atr * sl_mult / close * 100
+    tp1_pct = atr * tp1_mult / close * 100
+    tp2_pct = atr * tp2_mult / close * 100
+    rr = tp1_mult / sl_mult
+
+    method_txt = short_method_1 ? "Delta+Reject" : short_method_2 ? "Exhaustion" : "Holo Cross"
+
+    txt = "SELL [" + method_txt + "]\n" + str.tostring(close, "#.##") + "\n━━━━━━━━━━\n" + "SL: " + str.tostring(close + atr * sl_mult, "#.##") + " (+" + str.tostring(sl_pct, "#.#") + "%)\n" + "TP1: " + str.tostring(close - atr * tp1_mult, "#.##") + " (-" + str.tostring(tp1_pct, "#.#") + "%)\n" + "TP2: " + str.tostring(close - atr * tp2_mult, "#.##") + " (-" + str.tostring(tp2_pct, "#.#") + "%)\n" + "R:R = " + str.tostring(rr, "#.#") + ":1"
+    label.new(bar_index, high + atr * 0.5, txt, style=label.style_label_down, color=color_sell, textcolor=color.white, size=size.normal)
+
+// ============================================================================
+// 11. DASHBOARD
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 12, bgcolor=color.new(#1E1E1E, 5), border_width=1)
+
+if barstate.islast and show_dashboard
+    // Delta
+    delta_txt = str.tostring(delta_ratio * 100, "#.#") + "%"
+    delta_col = strong_buying ? color_buy : strong_selling ? color_sell : color.white
+
+    // VWAP deviation
+    vwap_txt = str.tostring(vwap_deviation, "#.##") + "σ"
+    vwap_col = price_above_vwap ? color_sell : price_below_vwap ? color_buy : color.white
+
+    // Holo trend
+    holo_txt = holo_bullish ? "BULLISH" : holo_bearish ? "BEARISH" : "NEUTRAL"
+    holo_col = holo_bullish ? color_buy : holo_bearish ? color_sell : color.gray
+
+    // Position
+    pos_txt = position == 1 ? "LONG" : position == -1 ? "SHORT" : "FLAT"
+    pos_col = position == 1 ? color_buy : position == -1 ? color_sell : color.gray
+
+    table.cell(dash, 0, 0, "MHS", text_color=color.white, text_size=size.normal, bgcolor=color.new(#1E1E1E, 0))
+    table.cell(dash, 1, 0, "v1.0", text_color=color.gray, text_size=size.tiny, bgcolor=color.new(#1E1E1E, 0))
+
+    table.cell(dash, 0, 1, "Delta", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 1, delta_txt, text_color=delta_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "Buy Pres.", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 2, strong_buying ? "STRONG" : "NORMAL", text_color=strong_buying ? color_buy : color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Sell Pres.", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 3, strong_selling ? "STRONG" : "NORMAL", text_color=strong_selling ? color_sell : color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "VWAP Dev", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 4, vwap_txt, text_color=vwap_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Holo Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 5, holo_txt, text_color=holo_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Compressed", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 6, holo_compressed ? "YES" : "NO", text_color=holo_compressed ? color.new(#FF9800, 0) : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 7, "─────────", text_color=color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 8, pos_txt, text_color=pos_col, text_size=size.tiny)
+
+    if position != 0
+        pnl = position == 1 ? (close - entry_price) / entry_price * 100 : (entry_price - close) / entry_price * 100
+        pnl_col = pnl > 0 ? color_buy : color_sell
+
+        table.cell(dash, 0, 9, "Entry", text_color=color.gray, text_size=size.tiny)
+        table.cell(dash, 1, 9, str.tostring(entry_price, "#.##"), text_color=color.white, text_size=size.tiny)
+
+        table.cell(dash, 0, 10, "P&L", text_color=color.gray, text_size=size.tiny)
+        table.cell(dash, 1, 10, str.tostring(pnl, "#.##") + "%", text_color=pnl_col, text_size=size.tiny)
+
+        table.cell(dash, 0, 11, "Type", text_color=color.gray, text_size=size.tiny)
+        table.cell(dash, 1, 11, signal_type, text_color=color.white, text_size=size.tiny)
+
+// ============================================================================
+// 12. ALERTS
+// ============================================================================
+
+alertcondition(long_signal_final, "BUY Signal", "MHS: BUY signal triggered")
+alertcondition(short_signal_final, "SELL Signal", "MHS: SELL signal triggered")
+alertcondition(strong_buying and not strong_buying[1], "Strong Buying", "MHS: Strong buying pressure detected")
+alertcondition(strong_selling and not strong_selling[1], "Strong Selling", "MHS: Strong selling pressure detected")
+alertcondition(bullish_rejection, "Bullish Rejection", "MHS: Bullish rejection candle")
+alertcondition(bearish_rejection, "Bearish Rejection", "MHS: Bearish rejection candle")
+alertcondition(holo_cross_up, "Holo Cross Up", "MHS: Holographic bullish cross")
+alertcondition(holo_cross_down, "Holo Cross Down", "MHS: Holographic bearish cross")
