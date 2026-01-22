@@ -1,0 +1,396 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// SPECTRAL HAWKES QUANTUM SYSTEM (SHQS)
+// =====================================
+// Institutional-grade quantitative indicator combining:
+// 1. Discrete Fourier Transform - Extracts dominant market cycles
+// 2. Phase Alignment Detection - Signals when multiple cycles converge
+// 3. Hawkes Self-Exciting Process - Models event clustering/intensity
+// 4. Kolmogorov-Smirnov Regime Shift - Detects distribution changes
+// 5. Maximum Entropy Extrapolation - Optimal price projection
+//
+// Signals 1-3x daily when mathematical conditions converge
+
+//@version=6
+indicator("Spectral Hawkes Quantum System", "SHQS", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+group_spectral = "══════ SPECTRAL ANALYSIS ══════"
+cycle_1 = input.int(8, "Cycle 1 Period", minval=4, maxval=50, group=group_spectral)
+cycle_2 = input.int(21, "Cycle 2 Period", minval=10, maxval=100, group=group_spectral)
+cycle_3 = input.int(55, "Cycle 3 Period", minval=20, maxval=200, group=group_spectral)
+phase_tolerance = input.float(0.15, "Phase Alignment Tolerance", minval=0.05, maxval=0.3, step=0.01, group=group_spectral)
+
+group_hawkes = "══════ HAWKES INTENSITY ══════"
+hawkes_decay = input.float(0.94, "Hawkes Decay (α)", minval=0.8, maxval=0.99, step=0.01, group=group_hawkes)
+hawkes_jump = input.float(0.3, "Hawkes Jump Size (β)", minval=0.1, maxval=1.0, step=0.05, group=group_hawkes)
+intensity_threshold = input.float(1.5, "Intensity Trigger", minval=1.0, maxval=3.0, step=0.1, group=group_hawkes)
+
+group_ks = "══════ K-S REGIME DETECTION ══════"
+ks_lookback = input.int(50, "K-S Lookback", minval=20, maxval=200, group=group_ks)
+ks_threshold = input.float(0.25, "K-S Divergence Threshold", minval=0.1, maxval=0.5, step=0.01, group=group_ks)
+
+group_risk = "══════ RISK MANAGEMENT ══════"
+atr_period = input.int(14, "ATR Period", minval=5, maxval=50, group=group_risk)
+sl_mult = input.float(1.5, "Stop Loss (ATR x)", minval=0.5, maxval=4.0, step=0.1, group=group_risk)
+tp1_mult = input.float(2.5, "Take Profit 1 (ATR x)", minval=1.0, maxval=6.0, step=0.1, group=group_risk)
+tp2_mult = input.float(4.0, "Take Profit 2 (ATR x)", minval=2.0, maxval=10.0, step=0.1, group=group_risk)
+
+group_display = "══════ DISPLAY ══════"
+show_cycles = input.bool(true, "Show Cycle Waves", group=group_display)
+show_sl_tp = input.bool(true, "Show SL/TP Levels", group=group_display)
+show_labels = input.bool(true, "Show Entry Labels", group=group_display)
+show_dashboard = input.bool(true, "Show Dashboard", group=group_display)
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+// Custom atan2 implementation (Pine Script doesn't have math.atan2)
+atan2(y, x) =>
+    float result = 0.0
+    if x > 0
+        result := math.atan(y / x)
+    else if x < 0 and y >= 0
+        result := math.atan(y / x) + math.pi
+    else if x < 0 and y < 0
+        result := math.atan(y / x) - math.pi
+    else if x == 0 and y > 0
+        result := math.pi / 2
+    else if x == 0 and y < 0
+        result := -math.pi / 2
+    else
+        result := 0.0
+    result
+
+// ============================================================================
+// SPECTRAL ANALYSIS - DISCRETE FOURIER TRANSFORM
+// ============================================================================
+// Extract dominant cycles using DFT components
+// X_k = Σ x_n * e^(-2πi*k*n/N)
+// We approximate using sine/cosine decomposition
+
+// Detrended price for cycle analysis
+detrend_period = math.max(cycle_3, 55)
+price_detrended = close - ta.sma(close, detrend_period)
+
+// Cycle 1: Short-term cycle
+sin_1 = math.sin(2 * math.pi * bar_index / cycle_1)
+cos_1 = math.cos(2 * math.pi * bar_index / cycle_1)
+amp_sin_1 = ta.correlation(price_detrended, sin_1, cycle_1 * 2)
+amp_cos_1 = ta.correlation(price_detrended, cos_1, cycle_1 * 2)
+cycle_1_wave = amp_sin_1 * sin_1 + amp_cos_1 * cos_1
+cycle_1_phase = atan2(amp_sin_1, amp_cos_1) / math.pi  // Normalized to [-1, 1]
+
+// Cycle 2: Medium-term cycle
+sin_2 = math.sin(2 * math.pi * bar_index / cycle_2)
+cos_2 = math.cos(2 * math.pi * bar_index / cycle_2)
+amp_sin_2 = ta.correlation(price_detrended, sin_2, cycle_2 * 2)
+amp_cos_2 = ta.correlation(price_detrended, cos_2, cycle_2 * 2)
+cycle_2_wave = amp_sin_2 * sin_2 + amp_cos_2 * cos_2
+cycle_2_phase = atan2(amp_sin_2, amp_cos_2) / math.pi
+
+// Cycle 3: Long-term cycle
+sin_3 = math.sin(2 * math.pi * bar_index / cycle_3)
+cos_3 = math.cos(2 * math.pi * bar_index / cycle_3)
+amp_sin_3 = ta.correlation(price_detrended, sin_3, cycle_3 * 2)
+amp_cos_3 = ta.correlation(price_detrended, cos_3, cycle_3 * 2)
+cycle_3_wave = amp_sin_3 * sin_3 + amp_cos_3 * cos_3
+cycle_3_phase = atan2(amp_sin_3, amp_cos_3) / math.pi
+
+// Composite cycle (weighted sum)
+composite_cycle = (cycle_1_wave * 0.5 + cycle_2_wave * 0.3 + cycle_3_wave * 0.2)
+composite_normalized = composite_cycle / math.max(ta.stdev(composite_cycle, 50), 1e-10)
+
+// Phase alignment detection
+// When all cycles are near turning points (phase near +1 or -1)
+phase_at_bottom_1 = cycle_1_phase < -(1 - phase_tolerance) or cycle_1_phase > (1 - phase_tolerance)
+phase_at_bottom_2 = cycle_2_phase < -(1 - phase_tolerance) or cycle_2_phase > (1 - phase_tolerance)
+phase_at_bottom_3 = cycle_3_phase < -(1 - phase_tolerance) or cycle_3_phase > (1 - phase_tolerance)
+
+// Cycles turning UP (from bottom)
+cycle_1_turning_up = cycle_1_phase[1] < cycle_1_phase and cycle_1_phase < -0.5
+cycle_2_turning_up = cycle_2_phase[1] < cycle_2_phase and cycle_2_phase < -0.3
+cycle_3_turning_up = cycle_3_phase[1] < cycle_3_phase and cycle_3_phase < -0.2
+
+// Cycles turning DOWN (from top)
+cycle_1_turning_down = cycle_1_phase[1] > cycle_1_phase and cycle_1_phase > 0.5
+cycle_2_turning_down = cycle_2_phase[1] > cycle_2_phase and cycle_2_phase > 0.3
+cycle_3_turning_down = cycle_3_phase[1] > cycle_3_phase and cycle_3_phase > 0.2
+
+// Phase convergence score (0-3)
+bullish_phase_score = (cycle_1_turning_up ? 1 : 0) + (cycle_2_turning_up ? 1 : 0) + (cycle_3_turning_up ? 1 : 0)
+bearish_phase_score = (cycle_1_turning_down ? 1 : 0) + (cycle_2_turning_down ? 1 : 0) + (cycle_3_turning_down ? 1 : 0)
+
+// ============================================================================
+// HAWKES SELF-EXCITING PROCESS
+// ============================================================================
+// λ(t) = μ + Σ α * e^(-β*(t-t_i))
+// Intensity increases after events, then decays
+// Models volatility clustering and momentum bursts
+
+// Define "events" as significant price moves
+returns = (close - close[1]) / close[1]
+returns_std = ta.stdev(returns, 20)
+significant_move = math.abs(returns) > returns_std * 1.5
+
+// Hawkes intensity (recursive)
+var float hawkes_intensity = 1.0
+hawkes_intensity := hawkes_decay * hawkes_intensity + (significant_move ? hawkes_jump : 0)
+
+// Normalized intensity
+intensity_baseline = ta.sma(hawkes_intensity, 100)
+intensity_normalized = hawkes_intensity / math.max(intensity_baseline, 1e-10)
+
+// High intensity = market is "excited" - moves tend to cluster
+intensity_high = intensity_normalized > intensity_threshold
+
+// ============================================================================
+// KOLMOGOROV-SMIRNOV REGIME DETECTION
+// ============================================================================
+// Compares recent vs historical return distribution
+// D = max|F_recent(x) - F_historical(x)|
+
+// Build empirical CDFs using percentile ranks
+recent_half = int(ks_lookback / 2)
+
+// Calculate percentile rank of current returns in recent vs full window
+rank_recent = ta.percentrank(returns, recent_half)
+rank_full = ta.percentrank(returns, ks_lookback)
+
+// K-S statistic approximation (difference in distribution)
+ks_stat = math.abs(rank_recent - rank_full) / 100
+ks_smoothed = ta.sma(ks_stat, 5)
+
+// Regime shift detected when K-S exceeds threshold
+regime_shift = ks_smoothed > ks_threshold
+
+// Direction of shift (based on return momentum)
+recent_momentum = ta.sma(returns, recent_half)
+shift_bullish = regime_shift and recent_momentum > 0
+shift_bearish = regime_shift and recent_momentum < 0
+
+// ============================================================================
+// MAXIMUM ENTROPY PRICE PROJECTION
+// ============================================================================
+// Burg's algorithm for optimal linear prediction
+// Extrapolates using maximum entropy principle
+
+// Simplified: Use autocorrelation-based prediction
+ac_1 = ta.correlation(close, close[1], 20)
+ac_2 = ta.correlation(close, close[2], 20)
+ac_3 = ta.correlation(close, close[3], 20)
+
+// Linear prediction coefficients (Yule-Walker approximation)
+pred_coef_1 = ac_1
+pred_coef_2 = (ac_2 - ac_1 * ac_1) / math.max(1 - ac_1 * ac_1, 1e-10)
+
+// Predicted next price
+price_predicted = close + pred_coef_1 * (close - close[1]) + pred_coef_2 * (close[1] - close[2])
+
+// Prediction direction
+prediction_bullish = price_predicted > close * 1.001
+prediction_bearish = price_predicted < close * 0.999
+
+// ============================================================================
+// ATR FOR RISK MANAGEMENT
+// ============================================================================
+atr = ta.atr(atr_period)
+
+// ============================================================================
+// COMBINED SIGNAL GENERATION
+// ============================================================================
+
+// LONG SIGNAL:
+// 1. At least 2 cycles turning up from bottom
+// 2. Hawkes intensity elevated (momentum clustering)
+// 3. K-S shows regime shift OR prediction bullish
+// 4. Price below recent high (not chasing)
+
+price_not_at_high = close < ta.highest(high, 10)[1]
+price_not_at_low = close > ta.lowest(low, 10)[1]
+
+long_condition_cycles = bullish_phase_score >= 2
+long_condition_intensity = intensity_normalized > 1.0
+long_condition_regime = shift_bullish or prediction_bullish
+long_condition_price = price_not_at_high
+
+long_signal = long_condition_cycles and long_condition_intensity and long_condition_regime and long_condition_price
+
+// SHORT SIGNAL:
+short_condition_cycles = bearish_phase_score >= 2
+short_condition_intensity = intensity_normalized > 1.0
+short_condition_regime = shift_bearish or prediction_bearish
+short_condition_price = price_not_at_low
+
+short_signal = short_condition_cycles and short_condition_intensity and short_condition_regime and short_condition_price
+
+// Prevent consecutive signals (cooldown)
+var int bars_since_long = 100
+var int bars_since_short = 100
+
+bars_since_long := long_signal[1] ? 0 : bars_since_long + 1
+bars_since_short := short_signal[1] ? 0 : bars_since_short + 1
+
+cooldown = 5  // Minimum bars between signals
+long_signal_final = long_signal and bars_since_long > cooldown and bars_since_short > cooldown
+short_signal_final = short_signal and bars_since_short > cooldown and bars_since_long > cooldown
+
+// ============================================================================
+// POSITION TRACKING
+// ============================================================================
+
+var int position = 0
+var float entry_price = na
+var float stop_loss = na
+var float take_profit_1 = na
+var float take_profit_2 = na
+
+// New entries
+if long_signal_final and position <= 0
+    position := 1
+    entry_price := close
+    stop_loss := close - atr * sl_mult
+    take_profit_1 := close + atr * tp1_mult
+    take_profit_2 := close + atr * tp2_mult
+
+if short_signal_final and position >= 0
+    position := -1
+    entry_price := close
+    stop_loss := close + atr * sl_mult
+    take_profit_1 := close - atr * tp1_mult
+    take_profit_2 := close - atr * tp2_mult
+
+// Exit logic
+if position == 1
+    if low <= stop_loss
+        position := 0
+    if high >= take_profit_2
+        position := 0
+
+if position == -1
+    if high >= stop_loss
+        position := 0
+    if low <= take_profit_2
+        position := 0
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Colors
+color_buy = color.new(#00E676, 0)
+color_sell = color.new(#FF5252, 0)
+color_sl = color.new(#FF1744, 0)
+color_tp1 = color.new(#00BCD4, 0)
+color_tp2 = color.new(#76FF03, 0)
+color_cycle = color.new(#9C27B0, 0)
+
+// Cycle visualization (on price scale)
+cycle_visual_scale = ta.sma(atr, 50) * 3
+cycle_mid = ta.sma(close, detrend_period)
+plot(show_cycles ? cycle_mid + composite_normalized * cycle_visual_scale : na, "Composite Cycle", color_cycle, 2)
+
+// SL/TP Lines
+plot(show_sl_tp and position != 0 ? stop_loss : na, "Stop Loss", color_sl, 2, plot.style_linebr)
+plot(show_sl_tp and position != 0 ? take_profit_1 : na, "Take Profit 1", color_tp1, 2, plot.style_linebr)
+plot(show_sl_tp and position != 0 ? take_profit_2 : na, "Take Profit 2", color_tp2, 2, plot.style_linebr)
+plot(show_sl_tp and position != 0 ? entry_price : na, "Entry", color.white, 1, plot.style_linebr)
+
+// Entry signals
+plotshape(long_signal_final, "BUY", shape.triangleup, location.belowbar, color_buy, size=size.large)
+plotshape(short_signal_final, "SELL", shape.triangledown, location.abovebar, color_sell, size=size.large)
+
+// Intensity background (subtle)
+intensity_bg = intensity_high ? color.new(#FF9800, 93) : na
+bgcolor(intensity_bg, title="High Intensity")
+
+// ============================================================================
+// ENTRY LABELS
+// ============================================================================
+
+if long_signal_final and show_labels
+    sl_pct = (close - (close - atr * sl_mult)) / close * 100
+    tp1_pct = ((close + atr * tp1_mult) - close) / close * 100
+    tp2_pct = ((close + atr * tp2_mult) - close) / close * 100
+    rr = tp1_mult / sl_mult
+
+    txt = "BUY @ " + str.tostring(close, "#.##") + "\n━━━━━━━━━━━━\n" + "SL: " + str.tostring(close - atr * sl_mult, "#.##") + " (-" + str.tostring(sl_pct, "#.#") + "%)\n" + "TP1: " + str.tostring(close + atr * tp1_mult, "#.##") + " (+" + str.tostring(tp1_pct, "#.#") + "%)\n" + "TP2: " + str.tostring(close + atr * tp2_mult, "#.##") + " (+" + str.tostring(tp2_pct, "#.#") + "%)\n" + "R:R = " + str.tostring(rr, "#.#") + ":1"
+    label.new(bar_index, low - atr * 0.5, txt, style=label.style_label_up, color=color_buy, textcolor=color.white, size=size.normal)
+
+if short_signal_final and show_labels
+    sl_pct = ((close + atr * sl_mult) - close) / close * 100
+    tp1_pct = (close - (close - atr * tp1_mult)) / close * 100
+    tp2_pct = (close - (close - atr * tp2_mult)) / close * 100
+    rr = tp1_mult / sl_mult
+
+    txt = "SELL @ " + str.tostring(close, "#.##") + "\n━━━━━━━━━━━━\n" + "SL: " + str.tostring(close + atr * sl_mult, "#.##") + " (+" + str.tostring(sl_pct, "#.#") + "%)\n" + "TP1: " + str.tostring(close - atr * tp1_mult, "#.##") + " (-" + str.tostring(tp1_pct, "#.#") + "%)\n" + "TP2: " + str.tostring(close - atr * tp2_mult, "#.##") + " (-" + str.tostring(tp2_pct, "#.#") + "%)\n" + "R:R = " + str.tostring(rr, "#.#") + ":1"
+    label.new(bar_index, high + atr * 0.5, txt, style=label.style_label_down, color=color_sell, textcolor=color.white, size=size.normal)
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 10, bgcolor=color.new(#1E1E1E, 5), border_width=1)
+
+if barstate.islast and show_dashboard
+    // Phase scores
+    bull_txt = str.tostring(bullish_phase_score) + "/3"
+    bear_txt = str.tostring(bearish_phase_score) + "/3"
+
+    // Intensity
+    int_txt = str.tostring(intensity_normalized, "#.##")
+    int_col = intensity_high ? color.new(#FF9800, 0) : color.white
+
+    // K-S
+    ks_txt = str.tostring(ks_smoothed, "#.###")
+    ks_col = regime_shift ? color.new(#E91E63, 0) : color.white
+
+    // Position
+    pos_txt = position == 1 ? "LONG" : position == -1 ? "SHORT" : "FLAT"
+    pos_col = position == 1 ? color_buy : position == -1 ? color_sell : color.gray
+
+    table.cell(dash, 0, 0, "SHQS", text_color=color.white, text_size=size.normal, bgcolor=color.new(#1E1E1E, 0))
+    table.cell(dash, 1, 0, "v1.0", text_color=color.gray, text_size=size.tiny, bgcolor=color.new(#1E1E1E, 0))
+
+    table.cell(dash, 0, 1, "Bull Cycles", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 1, bull_txt, text_color=bullish_phase_score >= 2 ? color_buy : color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "Bear Cycles", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 2, bear_txt, text_color=bearish_phase_score >= 2 ? color_sell : color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Intensity", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 3, int_txt, text_color=int_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "K-S Stat", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 4, ks_txt, text_color=ks_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Regime Shift", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 5, regime_shift ? "YES" : "NO", text_color=regime_shift ? color.new(#E91E63, 0) : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Prediction", text_color=color.gray, text_size=size.tiny)
+    pred_txt = prediction_bullish ? "BULLISH" : prediction_bearish ? "BEARISH" : "NEUTRAL"
+    pred_col = prediction_bullish ? color_buy : prediction_bearish ? color_sell : color.gray
+    table.cell(dash, 1, 6, pred_txt, text_color=pred_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "─────────", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 7, "─────────", text_color=color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 8, pos_txt, text_color=pos_col, text_size=size.tiny)
+
+    if position != 0
+        rr_current = tp1_mult / sl_mult
+        table.cell(dash, 0, 9, "R:R", text_color=color.gray, text_size=size.tiny)
+        table.cell(dash, 1, 9, str.tostring(rr_current, "#.#") + ":1", text_color=color_tp1, text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(long_signal_final, "BUY Signal", "SHQS: BUY signal - Cycle convergence + Hawkes intensity")
+alertcondition(short_signal_final, "SELL Signal", "SHQS: SELL signal - Cycle convergence + Hawkes intensity")
+alertcondition(intensity_high and not intensity_high[1], "Intensity Spike", "SHQS: Hawkes intensity spike - Increased volatility clustering")
+alertcondition(regime_shift and not regime_shift[1], "Regime Shift", "SHQS: K-S regime shift detected")

@@ -1,0 +1,188 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// MICROSTRUCTURE HOLOGRAPHIC SYSTEM (MHS) v2
+// ==========================================
+
+//@version=6
+indicator("Microstructure Holographic System", "MHS", overlay=true, max_labels_count=100)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+group_micro = "══════ MICROSTRUCTURE ══════"
+delta_length = input.int(10, "Delta Lookback", minval=3, maxval=30, group=group_micro)
+delta_threshold = input.float(0.6, "Delta Imbalance", minval=0.5, maxval=0.9, step=0.05, group=group_micro)
+
+group_holo = "══════ HOLOGRAPHIC ══════"
+holo_fast = input.int(8, "Fast EMA", minval=3, maxval=20, group=group_holo)
+holo_mid = input.int(21, "Mid EMA", minval=10, maxval=50, group=group_holo)
+holo_slow = input.int(55, "Slow EMA", minval=30, maxval=100, group=group_holo)
+
+group_risk = "══════ RISK MANAGEMENT ══════"
+atr_period = input.int(14, "ATR Period", minval=5, maxval=30, group=group_risk)
+sl_mult = input.float(1.2, "Stop Loss (ATR x)", minval=0.5, maxval=3.0, step=0.1, group=group_risk)
+tp1_mult = input.float(2.0, "TP1 (ATR x)", minval=1.0, maxval=4.0, step=0.1, group=group_risk)
+tp2_mult = input.float(3.0, "TP2 (ATR x)", minval=2.0, maxval=6.0, step=0.1, group=group_risk)
+
+group_display = "══════ DISPLAY ══════"
+show_ema = input.bool(true, "Show EMAs", group=group_display)
+show_labels = input.bool(true, "Show Labels", group=group_display)
+show_dashboard = input.bool(true, "Show Dashboard", group=group_display)
+
+// ============================================================================
+// CORE CALCULATIONS
+// ============================================================================
+
+// ATR
+atr = ta.atr(atr_period)
+
+// Volume Delta
+bar_range = high - low
+buy_vol = bar_range > 0 ? volume * (close - low) / bar_range : volume * 0.5
+sell_vol = bar_range > 0 ? volume * (high - close) / bar_range : volume * 0.5
+
+buy_sum = ta.sma(buy_vol, delta_length) * delta_length
+sell_sum = ta.sma(sell_vol, delta_length) * delta_length
+total_vol = buy_sum + sell_sum
+
+delta_ratio = total_vol > 0 ? buy_sum / total_vol : 0.5
+strong_buying = delta_ratio > delta_threshold
+strong_selling = delta_ratio < (1 - delta_threshold)
+
+// Holographic EMAs
+ema_fast = ta.ema(close, holo_fast)
+ema_mid = ta.ema(close, holo_mid)
+ema_slow = ta.ema(close, holo_slow)
+
+holo_bullish = ema_fast > ema_mid and ema_mid > ema_slow
+holo_bearish = ema_fast < ema_mid and ema_mid < ema_slow
+
+// EMA Crosses
+cross_up = ta.crossover(ema_fast, ema_mid)
+cross_down = ta.crossunder(ema_fast, ema_mid)
+
+// Price rejection (wicks)
+body_size = math.abs(close - open)
+upper_wick = high - math.max(close, open)
+lower_wick = math.min(close, open) - low
+
+bull_reject = bar_range > 0 and lower_wick > bar_range * 0.5 and close > open
+bear_reject = bar_range > 0 and upper_wick > bar_range * 0.5 and close < open
+
+// ============================================================================
+// SIGNALS
+// ============================================================================
+
+// LONG: Delta buying + (rejection OR cross up)
+long_signal = strong_buying and (bull_reject or cross_up)
+
+// SHORT: Delta selling + (rejection OR cross down)
+short_signal = strong_selling and (bear_reject or cross_down)
+
+// Cooldown
+var int last_bar = 0
+can_signal = bar_index - last_bar >= 3
+
+long_final = long_signal and can_signal
+short_final = short_signal and can_signal
+
+if long_final or short_final
+    last_bar := bar_index
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Colors
+col_buy = color.new(#00E676, 0)
+col_sell = color.new(#FF5252, 0)
+col_sl = color.new(#FF1744, 0)
+col_tp = color.new(#00BCD4, 0)
+
+// EMAs
+plot(show_ema ? ema_fast : na, "Fast EMA", color.new(#E91E63, 0), 1)
+plot(show_ema ? ema_mid : na, "Mid EMA", color.new(#9C27B0, 0), 1)
+plot(show_ema ? ema_slow : na, "Slow EMA", color.new(#3F51B5, 0), 2)
+
+// Signals
+plotshape(long_final, "BUY", shape.triangleup, location.belowbar, col_buy, size=size.large)
+plotshape(short_final, "SELL", shape.triangledown, location.abovebar, col_sell, size=size.large)
+
+// ============================================================================
+// ENTRY LABELS WITH SL/TP
+// ============================================================================
+
+if long_final and show_labels
+    sl_price = close - atr * sl_mult
+    tp1_price = close + atr * tp1_mult
+    tp2_price = close + atr * tp2_mult
+
+    sl_pct = atr * sl_mult / close * 100
+    tp1_pct = atr * tp1_mult / close * 100
+    rr = tp1_mult / sl_mult
+
+    txt = "BUY @ " + str.tostring(close, "#.##") + "\n" + "SL: " + str.tostring(sl_price, "#.##") + " (-" + str.tostring(sl_pct, "#.#") + "%)\n" + "TP1: " + str.tostring(tp1_price, "#.##") + " (+" + str.tostring(tp1_pct, "#.#") + "%)\n" + "TP2: " + str.tostring(tp2_price, "#.##") + "\n" + "R:R = " + str.tostring(rr, "#.#") + ":1"
+
+    label.new(bar_index, low, txt, style=label.style_label_up, color=col_buy, textcolor=color.white, size=size.small)
+
+    // Draw SL/TP lines
+    line.new(bar_index, sl_price, bar_index + 20, sl_price, color=col_sl, width=1, style=line.style_dashed)
+    line.new(bar_index, tp1_price, bar_index + 20, tp1_price, color=col_tp, width=1, style=line.style_dashed)
+    line.new(bar_index, tp2_price, bar_index + 20, tp2_price, color=color.new(#76FF03, 0), width=1, style=line.style_dashed)
+
+if short_final and show_labels
+    sl_price = close + atr * sl_mult
+    tp1_price = close - atr * tp1_mult
+    tp2_price = close - atr * tp2_mult
+
+    sl_pct = atr * sl_mult / close * 100
+    tp1_pct = atr * tp1_mult / close * 100
+    rr = tp1_mult / sl_mult
+
+    txt = "SELL @ " + str.tostring(close, "#.##") + "\n" + "SL: " + str.tostring(sl_price, "#.##") + " (+" + str.tostring(sl_pct, "#.#") + "%)\n" + "TP1: " + str.tostring(tp1_price, "#.##") + " (-" + str.tostring(tp1_pct, "#.#") + "%)\n" + "TP2: " + str.tostring(tp2_price, "#.##") + "\n" + "R:R = " + str.tostring(rr, "#.#") + ":1"
+
+    label.new(bar_index, high, txt, style=label.style_label_down, color=col_sell, textcolor=color.white, size=size.small)
+
+    // Draw SL/TP lines
+    line.new(bar_index, sl_price, bar_index + 20, sl_price, color=col_sl, width=1, style=line.style_dashed)
+    line.new(bar_index, tp1_price, bar_index + 20, tp1_price, color=col_tp, width=1, style=line.style_dashed)
+    line.new(bar_index, tp2_price, bar_index + 20, tp2_price, color=color.new(#76FF03, 0), width=1, style=line.style_dashed)
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 6, bgcolor=color.new(#1E1E1E, 10), border_width=1)
+
+if barstate.islast and show_dashboard
+    delta_txt = str.tostring(delta_ratio * 100, "#.#") + "%"
+    delta_col = strong_buying ? col_buy : strong_selling ? col_sell : color.white
+
+    trend_txt = holo_bullish ? "BULLISH" : holo_bearish ? "BEARISH" : "NEUTRAL"
+    trend_col = holo_bullish ? col_buy : holo_bearish ? col_sell : color.gray
+
+    table.cell(dash, 0, 0, "MHS v2", text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, 0, "", text_color=color.white)
+
+    table.cell(dash, 0, 1, "Delta", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 1, delta_txt, text_color=delta_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "Buying", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 2, strong_buying ? "STRONG" : "Normal", text_color=strong_buying ? col_buy : color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Selling", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 3, strong_selling ? "STRONG" : "Normal", text_color=strong_selling ? col_sell : color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 4, trend_txt, text_color=trend_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(atr, "#.##"), text_color=color.white, text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(long_final, "BUY Signal", "MHS: BUY signal")
+alertcondition(short_final, "SELL Signal", "MHS: SELL signal")

@@ -1,0 +1,266 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+//
+// REGIME OPTIMAL ENTRY SYSTEM (ROES) v2
+// =====================================
+// Overlay indicator with clear BUY/SELL signals + SL/TP levels on chart
+
+//@version=6
+indicator("Regime Optimal Entry System", "ROES", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=100)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+group_regime = "══════ REGIME DETECTION ══════"
+hurst_length = input.int(100, "Hurst Calculation Period", minval=50, maxval=300, group=group_regime)
+regime_threshold_mr = input.float(0.45, "Mean Reversion Threshold", minval=0.3, maxval=0.5, step=0.01, group=group_regime)
+
+group_entry = "══════ ENTRY SETTINGS ══════"
+ou_length = input.int(20, "Mean Period", minval=10, maxval=100, group=group_entry)
+ou_threshold = input.float(2.0, "Entry Deviation (σ)", minval=1.0, maxval=4.0, step=0.1, group=group_entry)
+
+group_risk = "══════ STOP LOSS / TAKE PROFIT ══════"
+atr_length = input.int(14, "ATR Period", minval=5, maxval=50, group=group_risk)
+sl_atr_mult = input.float(1.5, "Stop Loss (ATR x)", minval=0.5, maxval=5.0, step=0.1, group=group_risk)
+tp1_atr_mult = input.float(2.0, "Take Profit 1 (ATR x)", minval=1.0, maxval=5.0, step=0.1, group=group_risk)
+tp2_atr_mult = input.float(3.0, "Take Profit 2 (ATR x)", minval=1.5, maxval=8.0, step=0.1, group=group_risk)
+use_mean_tp = input.bool(true, "Use Mean as TP Target", group=group_risk)
+
+group_visual = "══════ DISPLAY ══════"
+show_sl_tp_lines = input.bool(true, "Show SL/TP Lines", group=group_visual)
+show_entry_zones = input.bool(true, "Show Entry Zones", group=group_visual)
+show_labels = input.bool(true, "Show Signal Labels", group=group_visual)
+show_dashboard = input.bool(true, "Show Dashboard", group=group_visual)
+
+// ============================================================================
+// CALCULATIONS
+// ============================================================================
+
+// --- Returns ---
+returns = math.log(close / close[1])
+
+// --- Hurst Exponent (Regime Detection) ---
+calculate_rs(length) =>
+    mean_ret = ta.sma(returns, length)
+    var float cum_dev = 0.0
+    var float max_cum = -1e10
+    var float min_cum = 1e10
+    cum_dev := 0.0
+    max_cum := -1e10
+    min_cum := 1e10
+    for i = 0 to length - 1
+        cum_dev := cum_dev + (returns[i] - mean_ret)
+        max_cum := math.max(max_cum, cum_dev)
+        min_cum := math.min(min_cum, cum_dev)
+    R = max_cum - min_cum
+    S = ta.stdev(returns, length)
+    R / math.max(S, 1e-10)
+
+rs_20 = calculate_rs(20)
+rs_40 = calculate_rs(40)
+rs_60 = calculate_rs(60)
+rs_80 = calculate_rs(80)
+
+log_n_20 = math.log(20.0)
+log_n_40 = math.log(40.0)
+log_n_60 = math.log(60.0)
+log_n_80 = math.log(80.0)
+
+log_rs_20 = math.log(math.max(rs_20, 1e-10))
+log_rs_40 = math.log(math.max(rs_40, 1e-10))
+log_rs_60 = math.log(math.max(rs_60, 1e-10))
+log_rs_80 = math.log(math.max(rs_80, 1e-10))
+
+mean_log_n = (log_n_20 + log_n_40 + log_n_60 + log_n_80) / 4
+mean_log_rs = (log_rs_20 + log_rs_40 + log_rs_60 + log_rs_80) / 4
+
+cov_term = (log_n_20 - mean_log_n) * (log_rs_20 - mean_log_rs) + (log_n_40 - mean_log_n) * (log_rs_40 - mean_log_rs) + (log_n_60 - mean_log_n) * (log_rs_60 - mean_log_rs) + (log_n_80 - mean_log_n) * (log_rs_80 - mean_log_rs)
+var_term = math.pow(log_n_20 - mean_log_n, 2) + math.pow(log_n_40 - mean_log_n, 2) + math.pow(log_n_60 - mean_log_n, 2) + math.pow(log_n_80 - mean_log_n, 2)
+
+hurst_raw = cov_term / math.max(var_term, 1e-10)
+hurst = ta.sma(math.max(0.0, math.min(1.0, hurst_raw)), 5)
+
+// Regime
+is_mean_reverting = hurst < regime_threshold_mr
+is_trending = hurst > 0.55
+
+// --- Mean & Deviation ---
+ou_mean = ta.sma(close, ou_length)
+ou_std = ta.stdev(close, ou_length)
+ou_zscore = (close - ou_mean) / math.max(ou_std, 1e-10)
+
+// --- ATR for SL/TP ---
+atr = ta.atr(atr_length)
+
+// --- Entry Zones ---
+upper_band = ou_mean + ou_std * ou_threshold
+lower_band = ou_mean - ou_std * ou_threshold
+
+// ============================================================================
+// SIGNAL LOGIC
+// ============================================================================
+
+// BUY: Price below lower band in mean-reverting regime
+buy_condition = is_mean_reverting and close < lower_band and close[1] >= lower_band[1]
+
+// SELL: Price above upper band in mean-reverting regime
+sell_condition = is_mean_reverting and close > upper_band and close[1] <= upper_band[1]
+
+// ============================================================================
+// POSITION TRACKING & SL/TP LEVELS
+// ============================================================================
+
+var int position = 0  // 1 = long, -1 = short, 0 = flat
+var float entry_price = na
+var float stop_loss = na
+var float take_profit1 = na
+var float take_profit2 = na
+var int entry_bar = na
+
+// New signals
+new_buy = buy_condition and position != 1
+new_sell = sell_condition and position != -1
+
+// Enter Long
+if new_buy
+    position := 1
+    entry_price := close
+    stop_loss := close - atr * sl_atr_mult
+    take_profit1 := close + atr * tp1_atr_mult
+    take_profit2 := use_mean_tp ? ou_mean : close + atr * tp2_atr_mult
+    entry_bar := bar_index
+
+// Enter Short
+if new_sell
+    position := -1
+    entry_price := close
+    stop_loss := close + atr * sl_atr_mult
+    take_profit1 := close - atr * tp1_atr_mult
+    take_profit2 := use_mean_tp ? ou_mean : close - atr * tp2_atr_mult
+    entry_bar := bar_index
+
+// Check exits for Long
+if position == 1
+    if low <= stop_loss
+        position := 0
+    if high >= take_profit1 or high >= take_profit2
+        position := 0
+
+// Check exits for Short
+if position == -1
+    if high >= stop_loss
+        position := 0
+    if low <= take_profit1 or low <= take_profit2
+        position := 0
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+// Colors
+color_buy = color.new(#00E676, 0)
+color_sell = color.new(#FF5252, 0)
+color_sl = color.new(#FF1744, 0)
+color_tp1 = color.new(#00BCD4, 0)
+color_tp2 = color.new(#76FF03, 0)
+color_mean = color.new(#FFC107, 0)
+
+// Mean line
+plot(ou_mean, "Mean", color_mean, 2)
+
+// Entry zone bands
+p_upper = plot(show_entry_zones ? upper_band : na, "Upper Zone", color.new(#FF5252, 60), 1)
+p_lower = plot(show_entry_zones ? lower_band : na, "Lower Zone", color.new(#00E676, 60), 1)
+fill(p_upper, p_lower, color.new(#607D8B, 90), title="Entry Zone")
+
+// SL/TP Lines (while in position)
+plot(show_sl_tp_lines and position != 0 ? stop_loss : na, "Stop Loss", color_sl, 2, plot.style_linebr)
+plot(show_sl_tp_lines and position != 0 ? take_profit1 : na, "Take Profit 1", color_tp1, 2, plot.style_linebr)
+plot(show_sl_tp_lines and position != 0 ? take_profit2 : na, "Take Profit 2", color_tp2, 2, plot.style_linebr)
+plot(show_sl_tp_lines and position != 0 ? entry_price : na, "Entry", color.white, 1, plot.style_linebr)
+
+// Entry Signals
+plotshape(new_buy, "BUY Signal", shape.triangleup, location.belowbar, color_buy, size=size.large)
+plotshape(new_sell, "SELL Signal", shape.triangledown, location.abovebar, color_sell, size=size.large)
+
+// Background for regime
+bgcolor(is_mean_reverting ? color.new(#9C27B0, 93) : is_trending ? color.new(#2196F3, 93) : color.new(#607D8B, 95))
+
+// ============================================================================
+// SIGNAL LABELS WITH SL/TP INFO
+// ============================================================================
+
+if new_buy and show_labels
+    sl_dist = math.abs(close - (close - atr * sl_atr_mult))
+    tp1_dist = math.abs((close + atr * tp1_atr_mult) - close)
+    sl_pct = sl_dist / close * 100
+    tp1_pct = tp1_dist / close * 100
+    tp2_val = use_mean_tp ? ou_mean : close + atr * tp2_atr_mult
+    tp2_pct = math.abs(tp2_val - close) / close * 100
+
+    txt = "BUY @ " + str.tostring(close, "#.##") + "\n━━━━━━━━━━\nSL: " + str.tostring(close - atr * sl_atr_mult, "#.##") + " (-" + str.tostring(sl_pct, "#.#") + "%)\nTP1: " + str.tostring(close + atr * tp1_atr_mult, "#.##") + " (+" + str.tostring(tp1_pct, "#.#") + "%)\nTP2: " + str.tostring(tp2_val, "#.##") + " (+" + str.tostring(tp2_pct, "#.#") + "%)"
+    label.new(bar_index, low - atr * 0.5, txt, style=label.style_label_up, color=color_buy, textcolor=color.white, size=size.normal)
+
+if new_sell and show_labels
+    sl_dist = math.abs((close + atr * sl_atr_mult) - close)
+    tp1_dist = math.abs(close - (close - atr * tp1_atr_mult))
+    sl_pct = sl_dist / close * 100
+    tp1_pct = tp1_dist / close * 100
+    tp2_val = use_mean_tp ? ou_mean : close - atr * tp2_atr_mult
+    tp2_pct = math.abs(close - tp2_val) / close * 100
+
+    txt = "SELL @ " + str.tostring(close, "#.##") + "\n━━━━━━━━━━\nSL: " + str.tostring(close + atr * sl_atr_mult, "#.##") + " (+" + str.tostring(sl_pct, "#.#") + "%)\nTP1: " + str.tostring(close - atr * tp1_atr_mult, "#.##") + " (-" + str.tostring(tp1_pct, "#.#") + "%)\nTP2: " + str.tostring(tp2_val, "#.##") + " (-" + str.tostring(tp2_pct, "#.#") + "%)"
+    label.new(bar_index, high + atr * 0.5, txt, style=label.style_label_down, color=color_sell, textcolor=color.white, size=size.normal)
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+var table dash = table.new(position.top_right, 2, 8, bgcolor=color.new(#1E1E1E, 5), border_width=1, border_color=color.gray)
+
+if barstate.islast and show_dashboard
+    // Regime
+    regime_txt = is_mean_reverting ? "MEAN REVERT" : is_trending ? "TRENDING" : "RANDOM"
+    regime_col = is_mean_reverting ? color_buy : is_trending ? color.new(#2196F3, 0) : color.gray
+
+    // Position
+    pos_txt = position == 1 ? "LONG" : position == -1 ? "SHORT" : "FLAT"
+    pos_col = position == 1 ? color_buy : position == -1 ? color_sell : color.gray
+
+    // Z-Score
+    zscore_col = math.abs(ou_zscore) > ou_threshold ? (ou_zscore > 0 ? color_sell : color_buy) : color.white
+
+    table.cell(dash, 0, 0, "ROES", text_color=color.white, text_size=size.normal, bgcolor=color.new(#1E1E1E, 0))
+    table.cell(dash, 1, 0, "v2.0", text_color=color.gray, text_size=size.tiny, bgcolor=color.new(#1E1E1E, 0))
+
+    table.cell(dash, 0, 1, "Regime", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 1, regime_txt, text_color=regime_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "Hurst", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 2, str.tostring(hurst, "#.###"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Z-Score", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 3, str.tostring(ou_zscore, "#.##"), text_color=zscore_col, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "ATR", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(atr, "#.##"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 5, pos_txt, text_color=pos_col, text_size=size.tiny)
+
+    if position != 0
+        rr = math.abs(take_profit1 - entry_price) / math.abs(entry_price - stop_loss)
+        table.cell(dash, 0, 6, "Entry", text_color=color.gray, text_size=size.tiny)
+        table.cell(dash, 1, 6, str.tostring(entry_price, "#.##"), text_color=color.white, text_size=size.tiny)
+
+        table.cell(dash, 0, 7, "R:R", text_color=color.gray, text_size=size.tiny)
+        table.cell(dash, 1, 7, str.tostring(rr, "#.#") + ":1", text_color=color_tp1, text_size=size.tiny)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(new_buy, "BUY Signal", "ROES: BUY signal triggered")
+alertcondition(new_sell, "SELL Signal", "ROES: SELL signal triggered")
+alertcondition(position[1] == 1 and position == 0, "Long Closed", "ROES: Long position closed")
+alertcondition(position[1] == -1 and position == 0, "Short Closed", "ROES: Short position closed")
